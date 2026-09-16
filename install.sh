@@ -131,6 +131,12 @@ echo -e "    ${GREEN}✓ Installed:${RESET} Howdy Face ID core & diagnostic HUD 
 echo -e "\n${BLUE}>>> Step 4: Installing Fingerprint Engine & Remote SSH Hook...${RESET}"
 mkdir -p /lib/security /usr/lib/openssh
 
+# Clean any legacy symlinks first
+rm -f /usr/local/bin/reaper-auth /usr/local/bin/reaper-fprint-auth /usr/local/bin/dp-auth \
+      /usr/local/bin/reaper-fingerprint /usr/local/bin/dp-fingerprint \
+      /usr/local/bin/reaper-ssh-askpass /usr/lib/openssh/ssh-askpass /usr/bin/ssh-askpass \
+      /lib/security/reaper_fprint_pam.py /lib/security/dp_fprint_pam.py
+
 # Reaper CLI
 cp "${SCRIPT_DIR}/bin/reaper-auth" /usr/local/bin/reaper-auth
 chmod 755 /usr/local/bin/reaper-auth
@@ -138,25 +144,21 @@ chmod 755 /usr/local/bin/reaper-auth
 # Fingerprint Manager & Multi-Device daemon
 cp "${SCRIPT_DIR}/bin/reaper-fprint-auth" /usr/local/bin/reaper-fprint-auth
 chmod 755 /usr/local/bin/reaper-fprint-auth
-rm -f /usr/local/bin/dp-auth
 ln -sf /usr/local/bin/reaper-fprint-auth /usr/local/bin/dp-auth
 
 cp "${SCRIPT_DIR}/bin/reaper-fingerprint" /usr/local/bin/reaper-fingerprint
 chmod 755 /usr/local/bin/reaper-fingerprint
-rm -f /usr/local/bin/dp-fingerprint
 ln -sf /usr/local/bin/reaper-fingerprint /usr/local/bin/dp-fingerprint
 
 # SSH Askpass hook
 cp "${SCRIPT_DIR}/bin/reaper-ssh-askpass" /usr/local/bin/reaper-ssh-askpass
 chmod 755 /usr/local/bin/reaper-ssh-askpass
-rm -f /usr/lib/openssh/ssh-askpass /usr/bin/ssh-askpass
 ln -sf /usr/local/bin/reaper-ssh-askpass /usr/lib/openssh/ssh-askpass
 ln -sf /usr/local/bin/reaper-ssh-askpass /usr/bin/ssh-askpass
 
 # PAM Module
 cp "${SCRIPT_DIR}/pam/reaper_fprint_pam.py" /lib/security/reaper_fprint_pam.py
 chmod 644 /lib/security/reaper_fprint_pam.py
-rm -f /lib/security/dp_fprint_pam.py
 ln -sf /lib/security/reaper_fprint_pam.py /lib/security/dp_fprint_pam.py
 
 echo -e "    ${GREEN}✓ Installed CLI:${RESET} reaper-auth, reaper-fprint-auth, reaper-fingerprint"
