@@ -1,0 +1,85 @@
+#!/usr/bin/env bash
+#
+# reaper-ssh-askpass: Sovereign OpenSSH Biometric Verification Engine
+# Orchestrates Howdy Face ID and Multi-Device Fingerprint authentication
+# for incoming remote SSH agent signature challenges.
+#
+# Part of Reaper Auth Engine (c) Mr. Reaper
+#
+
+PROMPT_TEXT="${1:-Authorization requested for SSH Key}"
+USER_NAME="${USER:-mr-reaper}"
+
+# Guarantee access to active desktop session bus and display
+export DBUS_SESSION_BUS_ADDRESS="${DBUS_SESSION_BUS_ADDRESS:-unix:path=/run/user/$(id -u)/bus}"
+export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+export DISPLAY="${DISPLAY:-:0}"
+export WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-wayland-0}"
+
+# Send desktop notification alert
+if command -v notify-send >/dev/null 2>&1; then
+    notify-send -a "Reaper Auth" -i security-high -u normal \
+        "Biometric Challenge: Remote Sudo" \
+        "Authenticating via Face ID or Fingerprint..." 2>/dev/null &
+fi
+
+# -------------------------------------------------------------------------
+# Tier 1: Face ID Authentication (Howdy Engine)
+# -------------------------------------------------------------------------
+if [ -f "/lib/security/howdy/compare.py" ]; then
+    if python3 /lib/security/howdy/compare.py "$USER_NAME" >/dev/null 2>&1; then
+        if command -v notify-send >/dev/null 2>&1; then
+            notify-send -a "Reaper Auth" -i security-high -t 2500 \
+                "Biometric Verified" "Face ID confirmed: $USER_NAME" 2>/dev/null &
+        fi
+        exit 0
+    fi
+fi
+
+# -------------------------------------------------------------------------
+# Tier 2: Multi-Device Fingerprint (Digital Persona USB + Laptop Sensor)
+# -------------------------------------------------------------------------
+if [ -x "/usr/local/bin/reaper-fprint-auth" ]; then
+    if /usr/local/bin/reaper-fprint-auth "$USER_NAME" --service ssh-sudo >/dev/null 2>&1; then
+        if command -v notify-send >/dev/null 2>&1; then
+            notify-send -a "Reaper Auth" -i security-high -t 2500 \
+                "Biometric Verified" "Fingerprint confirmed: $USER_NAME" 2>/dev/null &
+        fi
+        exit 0
+    fi
+elif [ -x "/usr/local/bin/dp-auth" ]; then
+    if /usr/local/bin/dp-auth "$USER_NAME" --service ssh-sudo >/dev/null 2>&1; then
+        if command -v notify-send >/dev/null 2>&1; then
+            notify-send -a "Reaper Auth" -i security-high -t 2500 \
+                "Biometric Verified" "Fingerprint confirmed: $USER_NAME" 2>/dev/null &
+        fi
+        exit 0
+    fi
+elif command -v fprintd-verify >/dev/null 2>&1; then
+    if fprintd-verify "$USER_NAME" >/dev/null 2>&1; then
+        if command -v notify-send >/dev/null 2>&1; then
+            notify-send -a "Reaper Auth" -i security-high -t 2500 \
+                "Biometric Verified" "Fingerprint confirmed: $USER_NAME" 2>/dev/null &
+        fi
+        exit 0
+    fi
+fi
+
+# -------------------------------------------------------------------------
+# Tier 3: Graphical Dialog Fallback (Zenity)
+# -------------------------------------------------------------------------
+if command -v zenity >/dev/null 2>&1; then
+    PASSWD=$(zenity --password --title="Reaper Auth: Remote Sudo Verification" --timeout=30 2>/dev/null)
+    if [ -n "$PASSWD" ]; then
+        if echo "$PASSWD" | su -c "true" "$USER_NAME" >/dev/null 2>&1; then
+            exit 0
+        fi
+    fi
+fi
+
+if command -v notify-send >/dev/null 2>&1; then
+    notify-send -a "Reaper Auth" -i dialog-error -u critical \
+        "Authorization Denied" "Biometric challenge failed or was canceled." 2>/dev/null &
+fi
+
+exit 1

@@ -1,0 +1,453 @@
+#!/usr/bin/env python3
+"""
+reaper-fprint-auth: Multi-Device Concurrent Fingerprint Authentication Engine.
+Simultaneously claims and manages all enrolled fingerprint sensors (Laptop Goodix + DigitalPersona USB).
+Features Access Level Hierarchies (Level 1: Primary Owner / Level 2: Second in Command - rinnythepooh).
+Enforces Granular Permissions Matrix (Login, Lockscreen, Polkit, and Sudo Command Whitelisting).
+
+Features:
+- Continuous Non-Stop Illumination: Optical USB sensor stays lit and instantly re-arms (50ms) on any scan
+- Verified VerifyStop() -> VerifyStart() state reset cycle preventing driver lockout
+- Dynamic hardware hotplugging via Manager signals
+- Live PAM streaming output with Access Level badges and permission enforcement
+- Instant shutdown of sensors and LEDs on successful authentication match
+- Generous configurable timeout (default 30s)
+"""
+
+import sys
+import os
+import signal
+import json
+import argparse
+import ctypes
+import gi
+
+# Robust broken-pipe absorber so child doesn't hang when parent PAM closes pipe
+_orig_print = print
+def print(*args, **kwargs):
+    try:
+        _orig_print(*args, **kwargs)
+        sys.stdout.flush()
+    except (BrokenPipeError, IOError, OSError):
+        pass
+
+gi.require_version("Gio", "2.0")
+gi.require_version("GLib", "2.0")
+from gi.repository import Gio, GLib
+
+FPRINT_SERVICE = "net.reactivated.Fprint"
+MANAGER_PATH = "/net/reactivated/Fprint/Manager"
+DEVICE_INTERFACE = "net.reactivated.Fprint.Device"
+
+CONFIG_PATHS = [
+    os.path.expanduser("~/.config/reaper-biometrics/aliases.json"),
+    "/home/mr-reaper/.config/reaper-biometrics/aliases.json",
+    "/etc/reaper-biometrics/aliases.json"
+]
+
+
+def load_biometric_config():
+    for p in CONFIG_PATHS:
+        if os.path.isfile(p):
+            try:
+                with open(p, "r", encoding="utf-8") as f:
+                    return json.load(f)
+            except Exception:
+                pass
+    return {}
+
+
+def get_finger_metadata(finger_name, username="mr-reaper", config=None):
+    if config is None:
+        config = load_biometric_config()
+    fmap = config.get("finger_map", {}).get(username, {})
+    if finger_name in fmap:
+        return fmap[finger_name]
+    return {
+        "alias": username,
+        "level": 1,
+        "label": finger_name,
+        "owner": username
+    }
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(description="Multi-Device Biometric Authentication Engine")
+    parser.add_argument("username", nargs="?", default=os.environ.get("PAM_USER", os.environ.get("USER", "mr-reaper")))
+    parser.add_argument("--service", default=os.environ.get("PAM_SERVICE", "unknown"))
+    parser.add_argument("--command", default=os.environ.get("SUDO_COMMAND", ""))
+    return parser.parse_args()
+
+
+def get_friendly_name(name: str, path: str) -> str:
+    if "Digital" in name or "uru4000" in name or "4500" in name:
+        return "Digital Persona USB Optical Reader"
+    elif "Goodix" in name or "goodix" in name.lower() or "0" in path:
+        return "Laptop Fingerprint Sensor"
+    return f"{name} ({os.path.basename(path)})"
+
+
+def is_optical_device(name: str) -> bool:
+    return "Digital" in name or "uru4000" in name or "4500" in name or "4000" in name
+
+
+def main():
+    args = parse_args()
+    username = args.username
+    service = args.service
+    command = args.command or os.environ.get("SUDO_COMMAND", "")
+    timeout_sec = int(os.environ.get("REAPER_FPRINT_TIMEOUT", "30"))
+    config = load_biometric_config()
+
+    try:
+        bus = Gio.bus_get_sync(Gio.BusType.SYSTEM, None)
+        manager = Gio.DBusProxy.new_sync(
+            bus, Gio.DBusProxyFlags.NONE, None,
+            FPRINT_SERVICE, MANAGER_PATH, "net.reactivated.Fprint.Manager", None
+        )
+        raw_device_paths = manager.GetDevices()
+    except Exception as e:
+        print(f"[REAPER-FPRINT] D-Bus connection error: {e}", file=sys.stderr)
+        sys.exit(2)
+
+    if isinstance(raw_device_paths, (list, tuple)) and len(raw_device_paths) > 0 and isinstance(raw_device_paths[0], (list, tuple)):
+        device_paths = list(raw_device_paths[0])
+    elif isinstance(raw_device_paths, (list, tuple)):
+        device_paths = list(raw_device_paths)
+    else:
+        device_paths = []
+
+    loop = GLib.MainLoop()
+    exit_code = [1]
+    matched_finger = [""]
+    failed_attempts = [0]
+    MAX_ATTEMPTS = 5
+
+    active_devices = {}
+
+    def disarm_device(path, release=True):
+        if path in active_devices:
+            dev_entry = active_devices[path]
+            if dev_entry.get("rearm_timer") is not None:
+                try:
+                    GLib.source_remove(dev_entry["rearm_timer"])
+                except Exception:
+                    pass
+                dev_entry["rearm_timer"] = None
+            if release:
+                try:
+                    dev_entry["proxy"].VerifyStop()
+                except Exception:
+                    pass
+                try:
+                    dev_entry["proxy"].Release()
+                except Exception:
+                    pass
+                try:
+                    dev_entry["proxy"].disconnect(dev_entry["signal_id"])
+                except Exception:
+                    pass
+            active_devices.pop(path, None)
+
+    def cleanup():
+        for path in list(active_devices.keys()):
+            disarm_device(path, release=True)
+
+    def handle_signal_terminate(signum, frame):
+        cleanup()
+        sys.exit(1)
+
+    signal.signal(signal.SIGINT, handle_signal_terminate)
+    signal.signal(signal.SIGTERM, handle_signal_terminate)
+
+    # Set PR_SET_PDEATHSIG so the kernel delivers SIGTERM to dp-auth if parent (PAM/GDM) terminates
+    try:
+        libc = ctypes.CDLL("libc.so.6")
+        PR_SET_PDEATHSIG = 1
+        libc.prctl(PR_SET_PDEATHSIG, signal.SIGTERM)
+    except Exception:
+        pass
+
+    # Hard watchdog alarm: terminate if main loop exceeds timeout + 5s
+    def on_alarm(signum, frame):
+        try:
+            cleanup()
+        finally:
+            os._exit(1)
+
+    signal.signal(signal.SIGALRM, on_alarm)
+    signal.alarm(timeout_sec + 5)
+
+    def rearm_device(path):
+        if path not in active_devices or exit_code[0] == 0:
+            return False
+        info = active_devices[path]
+        proxy = info["proxy"]
+        friendly = info["friendly"]
+        optical = info["is_optical"]
+
+        try:
+            try:
+                proxy.VerifyStop()
+            except Exception:
+                pass
+            proxy.VerifyStart("(s)", "")
+            info["is_verifying"] = True
+            if optical:
+                print(f"💡 {friendly} relit & ready for scan.", flush=True)
+            return True
+        except Exception as e:
+            info["rearm_timer"] = GLib.timeout_add(80, lambda: rearm_device(path))
+            return False
+
+    def schedule_rearm(path):
+        if path not in active_devices or exit_code[0] == 0:
+            return
+        info = active_devices[path]
+        if info.get("rearm_timer") is not None:
+            try:
+                GLib.source_remove(info["rearm_timer"])
+            except Exception:
+                pass
+
+        def on_rearm_timeout():
+            info["rearm_timer"] = None
+            rearm_device(path)
+            return False
+
+        info["rearm_timer"] = GLib.timeout_add(50, on_rearm_timeout)
+
+    def on_device_signal(proxy, sender, signal_name, parameters, path):
+        if path not in active_devices:
+            return
+        info = active_devices[path]
+        friendly = info["friendly"]
+        is_optical = info["is_optical"]
+
+        if signal_name == "VerifyFingerSelected":
+            f_name = parameters.unpack()[0]
+            matched_finger[0] = f_name
+
+        elif signal_name == "VerifyStatus":
+            result, done = parameters.unpack()
+
+            if result == "verify-match":
+                f_name = matched_finger[0] or "enrolled print"
+                meta = get_finger_metadata(f_name, username, config)
+                level = meta.get("level", 1)
+                alias = meta.get("alias", username)
+                label = meta.get("label", f_name)
+                owner = meta.get("owner", alias)
+
+                # Granular Access Control Enforcement for Level > 1
+                if level > 1:
+                    perms = config.get("permissions", {}).get(alias, {})
+
+                    # 1. Desktop Login / Lockscreen Unlock
+                    if service in ("gdm-password", "gdm-fingerprint", "login", "screensaver", "gnome-screensaver"):
+                        if not perms.get("lockscreen_unlock", True) and not perms.get("desktop_login", True):
+                            print(f"🔒 Access Denied: [{alias}] is not authorized to unlock the lockscreen or log in.", flush=True)
+                            exit_code[0] = 1
+                            cleanup()
+                            loop.quit()
+                            return
+
+                    # 2. Polkit Administrative Dialogs
+                    elif service in ("polkit-1", "polkit"):
+                        if not perms.get("polkit_admin", False):
+                            print(f"🔒 Access Denied: [{alias}] is not authorized for system administration prompts (Polkit).", flush=True)
+                            exit_code[0] = 1
+                            cleanup()
+                            loop.quit()
+                            return
+
+                    # 3. Sudo Terminal Execution
+                    elif service == "sudo":
+                        sudo_mode = perms.get("sudo_mode", "whitelist")
+                        if sudo_mode == "disabled":
+                            print(f"🔒 Access Denied: [{alias}] is not authorized for sudo terminal commands.", flush=True)
+                            exit_code[0] = 1
+                            cleanup()
+                            loop.quit()
+                            return
+                        elif sudo_mode == "whitelist":
+                            cmd = command.strip()
+                            # Check blocked commands first
+                            blocked = perms.get("blocked_commands", [])
+                            if any(b and b in cmd for b in blocked):
+                                print(f"🔒 Access Denied: Command '{cmd}' is restricted to Level 1 (Owner).", flush=True)
+                                exit_code[0] = 1
+                                cleanup()
+                                loop.quit()
+                                return
+
+                            # Check whitelist prefixes
+                            whitelist = perms.get("sudo_whitelist", [])
+                            matched_w = False
+                            for w in whitelist:
+                                w_clean = w.strip()
+                                if w_clean.endswith("*"):
+                                    if cmd.startswith(w_clean[:-1]):
+                                        matched_w = True
+                                        break
+                                elif cmd == w_clean or cmd.startswith(w_clean + " "):
+                                    matched_w = True
+                                    break
+
+                            if not matched_w:
+                                print(f"🔒 Access Denied: Command '{cmd}' is not on the authorized sudo whitelist for [{alias}].", flush=True)
+                                exit_code[0] = 1
+                                cleanup()
+                                loop.quit()
+                                return
+
+                tag = f"Level {level}: {alias} — {label}"
+                print(f"✅ Fingerprint recognized on {friendly} [{tag}]! Authorized.", flush=True)
+                exit_code[0] = 0
+                cleanup()
+                loop.quit()
+                return
+
+            elif result == "verify-no-match":
+                failed_attempts[0] += 1
+                remaining = max(0, MAX_ATTEMPTS - failed_attempts[0])
+                if failed_attempts[0] >= MAX_ATTEMPTS:
+                    print(f"⚠️ Fingerprint did not match on {friendly} (Attempt {failed_attempts[0]}/{MAX_ATTEMPTS}).", flush=True)
+                    print("🔒 Maximum fingerprint attempts reached (5/5). Defaulting to password...", flush=True)
+                    exit_code[0] = 1
+                    cleanup()
+                    loop.quit()
+                    return
+                else:
+                    print(f"⚠️ Fingerprint did not match on {friendly} ({remaining} attempts remaining). Sensor relit — try scanning again!", flush=True)
+
+            elif result == "verify-retry-scan":
+                hint = "press finger firmly flat against illuminated prism" if is_optical else "touch firmly"
+                print(f"⚠️ Scan unclear on {friendly}. Please {hint}.", flush=True)
+
+            elif result == "verify-swipe-too-short":
+                print(f"⚠️ Swipe too short on {friendly}. Please swipe again smoothly.", flush=True)
+
+            elif result == "verify-finger-not-centered":
+                print(f"⚠️ Center your finger on {friendly}.", flush=True)
+
+            elif result == "verify-remove-and-retry":
+                print(f"⚠️ Lift finger completely from {friendly} and place it again.", flush=True)
+
+            elif result == "verify-unknown-error":
+                print(f"⚠️ Resetting {friendly} sensor...", flush=True)
+
+            if done:
+                info["is_verifying"] = False
+                schedule_rearm(path)
+
+    # Candidate registration
+    for path in device_paths:
+        try:
+            dev = Gio.DBusProxy.new_sync(
+                bus, Gio.DBusProxyFlags.NONE, None,
+                FPRINT_SERVICE, path, DEVICE_INTERFACE, None
+            )
+            name = dev.get_cached_property("name").get_string()
+            enrolled = dev.ListEnrolledFingers("(s)", username)
+            if enrolled and len(enrolled) > 0:
+                dev.Claim("(s)", username)
+                sid = dev.connect("g-signal", on_device_signal, path)
+                friendly = get_friendly_name(name, path)
+                optical = is_optical_device(name)
+
+                active_devices[path] = {
+                    "proxy": dev,
+                    "name": name,
+                    "friendly": friendly,
+                    "enrolled": list(enrolled),
+                    "signal_id": sid,
+                    "is_optical": optical,
+                    "is_verifying": False,
+                    "rearm_timer": None
+                }
+        except Exception:
+            continue
+
+    if not active_devices:
+        sys.exit(2)
+
+    # Initial arming
+    for path in list(active_devices.keys()):
+        try:
+            active_devices[path]["proxy"].VerifyStart("(s)", "")
+            active_devices[path]["is_verifying"] = True
+        except Exception:
+            rearm_device(path)
+
+    # Header display with Access Level summaries
+    print(f"Touch any fingerprint reader ({len(active_devices)} active):", flush=True)
+    for path, info in active_devices.items():
+        counts = {}
+        for f in info["enrolled"]:
+            m = get_finger_metadata(f, username, config)
+            lvl = m.get("level", 1)
+            a = m.get("alias", username)
+            key = f"Level {lvl} {a}"
+            counts[key] = counts.get(key, 0) + 1
+        summary_parts = [f"{k}: {v}" for k, v in sorted(counts.items())]
+        summary_str = " | ".join(summary_parts) if summary_parts else f"{len(info['enrolled'])} enrolled"
+        print(f"  • {info['friendly']}: {len(info['enrolled'])} enrolled ({summary_str})", flush=True)
+
+    # Dynamic Hotplug Listener via Manager
+    def on_manager_signal(proxy, sender, signal_name, parameters):
+        if signal_name == "DeviceAdded":
+            new_path = parameters.unpack()[0]
+            if new_path not in active_devices:
+                try:
+                    new_dev = Gio.DBusProxy.new_sync(
+                        bus, Gio.DBusProxyFlags.NONE, None,
+                        FPRINT_SERVICE, new_path, DEVICE_INTERFACE, None
+                    )
+                    new_name = new_dev.get_cached_property("name").get_string()
+                    new_enrolled = new_dev.ListEnrolledFingers("(s)", username)
+                    if new_enrolled and len(new_enrolled) > 0:
+                        new_dev.Claim("(s)", username)
+                        sid = new_dev.connect("g-signal", on_device_signal, new_path)
+                        friendly = get_friendly_name(new_name, new_path)
+                        optical = is_optical_device(new_name)
+
+                        active_devices[new_path] = {
+                            "proxy": new_dev,
+                            "name": new_name,
+                            "friendly": friendly,
+                            "enrolled": list(new_enrolled),
+                            "signal_id": sid,
+                            "is_optical": optical,
+                            "is_verifying": False,
+                            "rearm_timer": None
+                        }
+                        rearm_device(new_path)
+                        print(f"🔌 Sensor connected & armed: {friendly} ({len(new_enrolled)} prints)", flush=True)
+                except Exception:
+                    pass
+
+    manager.connect("g-signal", on_manager_signal)
+
+    # Auto-timeout
+    def on_timeout():
+        print(f"\n⏱️ Verification timed out ({timeout_sec}s). Defaulting to password fallback...\n")
+        try:
+            cleanup()
+        finally:
+            loop.quit()
+        return False
+
+    GLib.timeout_add_seconds(timeout_sec, on_timeout)
+
+    try:
+        loop.run()
+    except KeyboardInterrupt:
+        cleanup()
+        sys.exit(1)
+
+    sys.exit(exit_code[0])
+
+
+if __name__ == "__main__":
+    main()

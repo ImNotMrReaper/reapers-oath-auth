@@ -1,0 +1,655 @@
+#!/usr/bin/env python3
+"""
+reaper-fingerprint: Unified multi-device biometric manager for Dell Laptop + DigitalPersona USB Reader.
+Directly interfaces with fprintd D-Bus to inspect, enroll, synchronize, and test hardware sensors.
+Features Access Level Hierarchies (Level 1: Primary Owner / Level 2: Second in Command - rinnythepooh).
+"""
+
+import sys
+import os
+import json
+import argparse
+import getpass
+import gi
+
+gi.require_version("Gio", "2.0")
+gi.require_version("GLib", "2.0")
+from gi.repository import Gio, GLib
+
+FPRINT_SERVICE = "net.reactivated.Fprint"
+MANAGER_PATH = "/net/reactivated/Fprint/Manager"
+DEVICE_INTERFACE = "net.reactivated.Fprint.Device"
+
+VALID_FINGERS = [
+    "right-index-finger",
+    "right-thumb",
+    "right-middle-finger",
+    "right-ring-finger",
+    "right-little-finger",
+    "left-index-finger",
+    "left-thumb",
+    "left-middle-finger",
+    "left-ring-finger",
+    "left-little-finger"
+]
+
+CONFIG_PATHS = [
+    "/etc/reaper-biometrics/aliases.json",
+    os.path.expanduser("~/.config/reaper-biometrics/aliases.json"),
+    "/home/mr-reaper/.config/reaper-biometrics/aliases.json"
+]
+
+RIN_SLOT_MAPPINGS = [
+    {
+        "slot": "right-middle-finger",
+        "rin_name": "Right Index Finger",
+        "rin_desc": "Rin's Right Index Finger",
+        "alias": "rinnythepooh",
+        "level": 2
+    },
+    {
+        "slot": "right-ring-finger",
+        "rin_name": "Right Thumb",
+        "rin_desc": "Rin's Right Thumb",
+        "alias": "rinnythepooh",
+        "level": 2
+    },
+    {
+        "slot": "left-middle-finger",
+        "rin_name": "Left Index Finger",
+        "rin_desc": "Rin's Left Index Finger",
+        "alias": "rinnythepooh",
+        "level": 2
+    },
+    {
+        "slot": "left-ring-finger",
+        "rin_name": "Left Thumb",
+        "rin_desc": "Rin's Left Thumb",
+        "alias": "rinnythepooh",
+        "level": 2
+    }
+]
+
+
+def load_biometric_config():
+    for p in CONFIG_PATHS:
+        if os.path.isfile(p):
+            try:
+                with open(p, "r", encoding="utf-8") as f:
+                    return json.load(f)
+            except Exception:
+                pass
+    return {}
+
+
+def save_biometric_config(cfg):
+    user_path = os.path.expanduser("~/.config/reaper-biometrics/aliases.json")
+    os.makedirs(os.path.dirname(user_path), exist_ok=True)
+    try:
+        with open(user_path, "w", encoding="utf-8") as f:
+            json.dump(cfg, f, indent=2)
+    except Exception as e:
+        print(f"⚠️ Warning: Could not write user config: {e}")
+
+    if os.geteuid() == 0:
+        etc_path = "/etc/reaper-biometrics/aliases.json"
+        os.makedirs(os.path.dirname(etc_path), exist_ok=True)
+        try:
+            with open(etc_path, "w", encoding="utf-8") as f:
+                json.dump(cfg, f, indent=2)
+        except Exception:
+            pass
+
+
+def get_finger_metadata(finger_name, username="mr-reaper", config=None):
+    if config is None:
+        config = load_biometric_config()
+    fmap = config.get("finger_map", {}).get(username, {})
+    if finger_name in fmap:
+        return fmap[finger_name]
+    return {
+        "alias": username,
+        "level": 1,
+        "label": finger_name,
+        "owner": username
+    }
+
+
+def get_bus():
+    return Gio.bus_get_sync(Gio.BusType.SYSTEM, None)
+
+
+def get_devices(bus):
+    manager_proxy = Gio.DBusProxy.new_sync(
+        bus,
+        Gio.DBusProxyFlags.NONE,
+        None,
+        FPRINT_SERVICE,
+        MANAGER_PATH,
+        "net.reactivated.Fprint.Manager",
+        None
+    )
+    result = manager_proxy.GetDevices()
+    if isinstance(result, (list, tuple)):
+        if len(result) > 0 and isinstance(result[0], (list, tuple)):
+            return list(result[0])
+        return list(result)
+    return []
+
+
+def get_device_proxy(bus, path):
+    return Gio.DBusProxy.new_sync(
+        bus,
+        Gio.DBusProxyFlags.NONE,
+        None,
+        FPRINT_SERVICE,
+        path,
+        DEVICE_INTERFACE,
+        None
+    )
+
+
+def is_optical(name: str) -> bool:
+    return "Digital" in name or "uru4000" in name or "4500" in name or "4000" in name
+
+
+def list_devices(bus, username):
+    paths = get_devices(bus)
+    config = load_biometric_config()
+    print("\n=======================================================")
+    print(" 🛡️  REAPER BIOMETRIC SENSORS & ACCESS HIERARCHY AUDIT")
+    print("=======================================================")
+    if not paths:
+        print("❌ No fingerprint devices found.")
+        return
+
+    dev_data = []
+    all_enrolled_fingers = set()
+
+    for path in paths:
+        proxy = get_device_proxy(bus, path)
+        name = proxy.get_cached_property("name").get_string()
+        num_stages = proxy.get_cached_property("num-enroll-stages").get_int32()
+        scan_type = proxy.get_cached_property("scan-type").get_string()
+
+        optical = is_optical(name)
+        dev_type = "USB External Reader (Optical)" if optical else "Laptop Built-in Sensor (Goodix MOC)"
+
+        enrolled_list = []
+        try:
+            enrolled = proxy.ListEnrolledFingers("(s)", username)
+            if enrolled and len(enrolled) > 0:
+                enrolled_list = list(enrolled)
+                all_enrolled_fingers.update(enrolled_list)
+        except Exception:
+            pass
+
+        dev_data.append({
+            "path": path,
+            "proxy": proxy,
+            "name": name,
+            "dev_type": dev_type,
+            "optical": optical,
+            "stages": num_stages,
+            "scan_type": scan_type,
+            "enrolled": enrolled_list
+        })
+
+    for d in dev_data:
+        print(f"\n📍 Device: \033[1;35m{d['name']}\033[0m ({d['dev_type']})")
+        print(f"   D-Bus Path:      {d['path']}")
+        print(f"   Sensor Physics:  {d['scan_type'].title()} ({'Optical TIR Prism' if d['optical'] else 'Capacitive Match-on-Chip'})")
+        print(f"   Enrollment:      {d['stages']} touches/scans per finger")
+
+        if d["enrolled"]:
+            print(f"   Enrolled Fingerprints for account '\033[1;36m{username}\033[0m' ({len(d['enrolled'])} total):")
+            
+            # Group by Level
+            lvl1_fingers = []
+            lvl2_fingers = []
+            other_fingers = []
+
+            for f in d["enrolled"]:
+                meta = get_finger_metadata(f, username, config)
+                lvl = meta.get("level", 1)
+                if lvl == 1:
+                    lvl1_fingers.append((f, meta))
+                elif lvl == 2:
+                    lvl2_fingers.append((f, meta))
+                else:
+                    other_fingers.append((f, meta))
+
+            if lvl1_fingers:
+                print(f"     👑 \033[1;36m[LEVEL 1: PRIMARY OWNER] mr-reaper ({len(lvl1_fingers)} prints):\033[0m")
+                for f, meta in lvl1_fingers:
+                    lbl = meta.get("label", f)
+                    print(f"        ✅ \033[1;32m{f}\033[0m \033[0;90m({lbl})\033[0m")
+
+            if lvl2_fingers:
+                print(f"     💖 \033[1;35m[LEVEL 2: SECOND IN COMMAND] rinnythepooh (Rin) ({len(lvl2_fingers)} prints):\033[0m")
+                for f, meta in lvl2_fingers:
+                    lbl = meta.get("label", f)
+                    print(f"        ✅ \033[1;35m{f}\033[0m \033[1;33m({lbl})\033[0m")
+
+            if other_fingers:
+                print(f"     🔹 Other Enrolled Prints ({len(other_fingers)}):")
+                for f, meta in other_fingers:
+                    lbl = meta.get("label", f)
+                    print(f"        ✅ {f} ({lbl})")
+        else:
+            print("   Enrolled Prints: \033[1;33mNone (Not enrolled yet)\033[0m")
+
+        # Missing fingers check
+        missing = all_enrolled_fingers - set(d["enrolled"])
+        if missing:
+            print(f"   \033[1;33m⚠️  Missing Fingers (Enrolled on other devices):\033[0m")
+            for mf in sorted(missing):
+                meta = get_finger_metadata(mf, username, config)
+                lbl = meta.get("label", mf)
+                alias = meta.get("alias", username)
+                print(f"     ❌ \033[1;31m{mf}\033[0m \033[0;90m({alias}: {lbl})\033[0m")
+            target_arg = "usb" if d["optical"] else "laptop"
+            print(f"     👉 Run: \033[1;36mreaper-fingerprint enroll --device {target_arg} --finger <finger>\033[0m")
+
+    # Parity summary
+    print("\n-------------------------------------------------------")
+    has_discrepancy = any(len(all_enrolled_fingers - set(d["enrolled"])) > 0 for d in dev_data)
+    if has_discrepancy:
+        print("💡 \033[1;33mPARITY NOTICE:\033[0m Some fingers are missing on one of your sensors.")
+        print("   Run \033[1;32mreaper-fingerprint sync\033[0m to automatically enroll all missing fingers!")
+    else:
+        print("🎉 \033[1;32mFULL SENSOR PARITY:\033[0m All sensors have identical enrolled fingerprints.")
+    print("=======================================================\n")
+
+
+def resolve_device_path(bus, target: str) -> str:
+    paths = get_devices(bus)
+    if not paths:
+        return None
+
+    if target.lower() in ("usb", "digitalpersona", "external", "1", "optical"):
+        for p in paths:
+            proxy = get_device_proxy(bus, p)
+            name = proxy.get_cached_property("name").get_string()
+            if is_optical(name) or "1" in p:
+                return p
+        return paths[-1]
+
+    if target.lower() in ("laptop", "goodix", "builtin", "internal", "0", "moc"):
+        for p in paths:
+            proxy = get_device_proxy(bus, p)
+            name = proxy.get_cached_property("name").get_string()
+            if "Goodix" in name or "0" in p:
+                return p
+        return paths[0]
+
+    return paths[0]
+
+
+def enroll_finger(bus, username: str, target: str, finger: str, prompt_hint: str = None):
+    path = resolve_device_path(bus, target)
+    if not path:
+        print("❌ Target device not found.")
+        sys.exit(1)
+
+    proxy = get_device_proxy(bus, path)
+    name = proxy.get_cached_property("name").get_string()
+    num_stages = proxy.get_cached_property("num-enroll-stages").get_int32()
+    optical = is_optical(name)
+
+    print(f"\n🔐 Starting Enrollment for \033[1;35m{username}\033[0m")
+    print(f"   Target Sensor:  \033[1;34m{name}\033[0m ({'Optical USB Reader' if optical else 'Laptop Sensor'})")
+    print(f"   Internal Slot:  \033[1;32m{finger}\033[0m" + (f" \033[1;33m({prompt_hint})\033[0m" if prompt_hint else ""))
+    print(f"   Required Steps: {num_stages} clean touches/scans")
+    if optical:
+        print("   💡 TIP: Press finger pad FIRMLY & FLAT against the illuminated blue prism.")
+    else:
+        print("   💡 TIP: Touch finger squarely on the laptop power button sensor.")
+    print("-------------------------------------------------------")
+
+    try:
+        proxy.Claim("(s)", username)
+    except Exception as e:
+        print(f"❌ Failed to claim fingerprint device: {e}")
+        print("   (Ensure no other application or PAM prompt is actively holding the sensor)")
+        sys.exit(1)
+
+    loop = GLib.MainLoop()
+    current_stage = [1]
+    success = [False]
+
+    def on_enroll_status(proxy, sender, signal_name, parameters):
+        if signal_name != "EnrollStatus":
+            return
+        result, done = parameters.unpack()
+
+        if result == "enroll-stage-passed":
+            print(f"   ✅ Stage {current_stage[0]}/{num_stages} captured! (Lift finger and press again)")
+            current_stage[0] += 1
+        elif result == "enroll-retry-scan":
+            hint = "press finger firmly flat against illuminated prism" if optical else "touch firmly"
+            print(f"   ⚠️  Scan unclear. Please {hint}.")
+        elif result == "enroll-finger-not-centered":
+            print("   ⚠️  Finger was not centered. Center your finger pad on the sensor.")
+        elif result == "enroll-remove-and-retry":
+            print("   ⚠️  Lift finger completely and place it down again.")
+        elif result == "enroll-swipe-too-short":
+            print("   ⚠️  Swipe was too short. Please try again.")
+        elif result == "enroll-completed":
+            print(f"\n🎉 \033[1;32mEnrollment Successfully Completed!\033[0m")
+            print(f"   \033[1;35m{finger}\033[0m is now permanently registered on \033[1;34m{name}\033[0m.")
+            success[0] = True
+        elif result == "enroll-failed":
+            print(f"\n❌ \033[1;31mEnrollment Failed.\033[0m")
+
+        if done:
+            loop.quit()
+
+    signal_id = proxy.connect("g-signal", on_enroll_status)
+
+    try:
+        if optical:
+            print(f"👉 Press your finger flat on the blue illuminated prism (Stage 1/{num_stages})...\n")
+        else:
+            print(f"👉 Touch your finger on the laptop sensor (Stage 1/{num_stages})...\n")
+        proxy.EnrollStart("(s)", finger)
+        loop.run()
+    except KeyboardInterrupt:
+        print("\n\n⚠️ Enrollment cancelled by user.")
+    finally:
+        try:
+            proxy.EnrollStop()
+        except Exception:
+            pass
+        try:
+            proxy.Release()
+        except Exception:
+            pass
+        proxy.disconnect(signal_id)
+
+    return success[0]
+
+
+def enroll_rin_guided(bus, username: str):
+    """
+    Dedicated interactive guided enrollment flow for Rin (rinnythepooh / Level 2).
+    Enrolls 4 fingers: Right Index, Right Thumb, Left Index, Left Thumb.
+    Enrolls sequentially across BOTH the USB Optical Reader and Laptop Goodix Sensor.
+    """
+    print("\n=======================================================")
+    print(" 💖 RINNYTHEPOOH (RIN) BIOMETRIC ENROLLMENT WIZARD")
+    print(" 👑 Access Level: LEVEL 2 (SECOND IN COMMAND)")
+    print("=======================================================")
+    print("This wizard will enroll Rin's 4 primary fingers across BOTH sensors:")
+    print("  1. Right Index Finger  --> Internal slot: right-middle-finger")
+    print("  2. Right Thumb         --> Internal slot: right-ring-finger")
+    print("  3. Left Index Finger   --> Internal slot: left-middle-finger")
+    print("  4. Left Thumb          --> Internal slot: left-ring-finger")
+    print("\nBoth sensors will be calibrated for 100% hardware parity:")
+    print("  • Digital Persona USB Optical Reader (6 touches/scans per finger)")
+    print("  • Laptop Built-in Goodix MOC Sensor (13 touches per finger)")
+    print("-------------------------------------------------------")
+
+    try:
+        resp = input("Ready to begin Rin's biometric enrollment? [Y/n]: ").strip().lower()
+        if resp in ("n", "no", "q"):
+            print("Enrollment postponed.")
+            return
+    except (EOFError, KeyboardInterrupt):
+        print("\nExiting.")
+        return
+
+    config = load_biometric_config()
+    if "finger_map" not in config:
+        config["finger_map"] = {}
+    if username not in config["finger_map"]:
+        config["finger_map"][username] = {}
+
+    for item in RIN_SLOT_MAPPINGS:
+        slot = item["slot"]
+        rin_name = item["rin_name"]
+        rin_desc = item["rin_desc"]
+
+        print(f"\n=======================================================")
+        print(f" 💖 ENROLLING: {rin_desc.upper()}")
+        print(f"=======================================================")
+
+        # Step 1: USB Optical Reader
+        print(f"\n[Step 1/2] USB Optical Reader — 6 scans needed")
+        input(f"👉 Ask Rin to get her {rin_name} ready. Press [ENTER] to start USB reader scan...")
+        ok_usb = enroll_finger(bus, username, "usb", slot, prompt_hint=rin_desc)
+        if not ok_usb:
+            print(f"⚠️ USB enrollment for {rin_name} was not completed. Continuing...")
+
+        # Step 2: Laptop Built-in Sensor
+        print(f"\n[Step 2/2] Laptop Built-in Power Button Sensor — 13 touches needed")
+        input(f"👉 Ask Rin to get her {rin_name} ready for the laptop sensor. Press [ENTER] to start...")
+        ok_laptop = enroll_finger(bus, username, "laptop", slot, prompt_hint=rin_desc)
+        if not ok_laptop:
+            print(f"⚠️ Laptop sensor enrollment for {rin_name} was not completed.")
+
+        # Update alias mapping
+        config["finger_map"][username][slot] = {
+            "alias": "rinnythepooh",
+            "level": 2,
+            "label": rin_desc,
+            "owner": "Rin (rinnythepooh)"
+        }
+        save_biometric_config(config)
+        print(f"\n✅ {rin_desc} saved under 'rinnythepooh' (Level 2)!")
+
+    print("\n=======================================================")
+    print(" 🎉 RINNYTHEPOOH BIOMETRIC ENROLLMENT COMPLETE!")
+    print("=======================================================")
+    print("All 4 fingers have been registered under alias 'rinnythepooh' (Level 2).")
+    print("Rin can now unlock the computer and authorize sudo actions using her fingerprint!")
+    print("-------------------------------------------------------")
+    list_devices(bus, username)
+
+
+def sync_all_fingers(bus, username: str):
+    paths = get_devices(bus)
+    if len(paths) < 2:
+        print("ℹ️ Only one fingerprint sensor is connected. Nothing to synchronize.")
+        return
+
+    all_fingers = set()
+    dev_fingers = {}
+    dev_names = {}
+
+    for p in paths:
+        proxy = get_device_proxy(bus, p)
+        name = proxy.get_cached_property("name").get_string()
+        optical = is_optical(name)
+        friendly = "USB External Reader" if optical else "Laptop Sensor"
+        dev_names[p] = f"{friendly} ({name})"
+
+        try:
+            enrolled = proxy.ListEnrolledFingers("(s)", username)
+            dev_fingers[p] = list(enrolled) if enrolled else []
+            all_fingers.update(dev_fingers[p])
+        except Exception:
+            dev_fingers[p] = []
+
+    missing_tasks = []
+    for p in paths:
+        missing = all_fingers - set(dev_fingers[p])
+        for f in sorted(missing):
+            missing_tasks.append((p, dev_names[p], f))
+
+    if not missing_tasks:
+        print("\n🎉 \033[1;32mAll sensors already have 100% biometric parity!\033[0m")
+        print(f"   Enrolled fingers across all devices: {', '.join(sorted(all_fingers))}\n")
+        return
+
+    print("\n=======================================================")
+    print(" 🔄 BIOMETRIC SENSOR SYNCHRONIZATION WIZARD")
+    print("=======================================================")
+    print(f"Found {len(missing_tasks)} missing fingerprint enrollment(s) to achieve total parity:\n")
+    for idx, (p, d_name, f) in enumerate(missing_tasks, 1):
+        print(f"  {idx}. \033[1;32m{f}\033[0m on \033[1;34m{d_name}\033[0m")
+    print("-------------------------------------------------------")
+
+    try:
+        resp = input("Ready to synchronize these fingers? [Y/n]: ").strip().lower()
+        if resp in ("n", "no", "q"):
+            print("Synchronization skipped.")
+            return
+    except (EOFError, KeyboardInterrupt):
+        print("\nExiting.")
+        return
+
+    for idx, (p, d_name, f) in enumerate(missing_tasks, 1):
+        target_alias = "usb" if "USB" in d_name else "laptop"
+        print(f"\n[{idx}/{len(missing_tasks)}] Synchronizing \033[1;32m{f}\033[0m on \033[1;34m{d_name}\033[0m...")
+        enroll_finger(bus, username, target_alias, f)
+
+    print("\n🎉 \033[1;32mSynchronization finished!\033[0m Run 'reaper-fingerprint list' to verify.\n")
+
+
+def verify_finger(bus, username: str, target: str):
+    if target in ("both", "all"):
+        print(f"\n🔍 Running concurrent multi-device verification test for {username}...")
+        os.system(f"/home/mr-reaper/.local/bin/reaper-fprint-auth {username}")
+        return
+
+    path = resolve_device_path(bus, target)
+    if not path:
+        print("❌ Device not found.")
+        sys.exit(1)
+
+    proxy = get_device_proxy(bus, path)
+    name = proxy.get_cached_property("name").get_string()
+    optical = is_optical(name)
+    config = load_biometric_config()
+
+    print(f"\n🔍 Testing Verification on \033[1;34m{name}\033[0m for {username}")
+    print(f"   Sensor Physics: {'Optical TIR Prism with Blue LED' if optical else 'Capacitive Match-on-Chip'}")
+    print("-------------------------------------------------------")
+
+    try:
+        proxy.Claim("(s)", username)
+    except Exception as e:
+        print(f"❌ Failed to claim device: {e}")
+        sys.exit(1)
+
+    loop = GLib.MainLoop()
+
+    def arm(is_rearm=False):
+        try:
+            try:
+                proxy.VerifyStop()
+            except Exception:
+                pass
+            proxy.VerifyStart("(s)", "")
+            if is_rearm and optical:
+                print("💡 Sensor relit & ready for scan.", flush=True)
+        except Exception as e:
+            print(f"⚠️ Arm error: {e}", flush=True)
+
+    matched_finger = [""]
+
+    def on_verify_status(proxy, sender, signal_name, parameters):
+        if signal_name == "VerifyStatus":
+            result, done = parameters.unpack()
+            if result == "verify-match":
+                f_name = matched_finger[0] or "enrolled print"
+                meta = get_finger_metadata(f_name, username, config)
+                lvl = meta.get("level", 1)
+                alias = meta.get("alias", username)
+                label = meta.get("label", f_name)
+                owner = meta.get("owner", alias)
+                tag = f"Level {lvl}: {alias} — {label}"
+                print(f"\n🎉 \033[1;32mVERIFICATION SUCCESS: Matched [{tag}]!\033[0m\n")
+                loop.quit()
+            elif result == "verify-no-match":
+                print("\n⚠️ \033[1;33mDid not match.\033[0m Sensor relit — try scanning again!", flush=True)
+                if done:
+                    GLib.timeout_add(50, lambda: [arm(is_rearm=True), False][1])
+            elif result == "verify-retry-scan":
+                print("   ⚠️ Unclear scan. Press firmly flat against sensor.", flush=True)
+                if done:
+                    GLib.timeout_add(50, lambda: [arm(is_rearm=True), False][1])
+
+        elif signal_name == "VerifyFingerSelected":
+            matched_finger[0] = parameters.unpack()[0]
+
+    signal_id = proxy.connect("g-signal", on_verify_status)
+
+    try:
+        print(f"👉 Press your enrolled finger on the sensor...\n")
+        arm(is_rearm=False)
+        loop.run()
+    except KeyboardInterrupt:
+        print("\n\n⚠️ Verification cancelled.")
+    finally:
+        try:
+            proxy.VerifyStop()
+        except Exception:
+            pass
+        try:
+            proxy.Release()
+        except Exception:
+            pass
+        proxy.disconnect(signal_id)
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Reaper Multi-Device Biometric Manager & Access Hierarchy")
+    subparsers = parser.add_subparsers(dest="command")
+
+    # list
+    subparsers.add_parser("list", help="List all detected sensors, enrolled prints & access hierarchy audit")
+
+    # sync
+    subparsers.add_parser("sync", help="Synchronize missing fingerprints across all sensors")
+
+    # enroll
+    enroll_parser = subparsers.add_parser("enroll", help="Enroll a fingerprint on a specific sensor")
+    enroll_parser.add_argument("--device", choices=["usb", "laptop"], default="usb",
+                               help="Target device (default: usb)")
+    enroll_parser.add_argument("--finger", choices=VALID_FINGERS, default="right-index-finger",
+                               help="Finger to enroll (default: right-index-finger)")
+    enroll_parser.add_argument("--alias", default="mr-reaper", help="Alias to assign (e.g. rinnythepooh)")
+    enroll_parser.add_argument("--level", type=int, default=1, help="Access level (1 or 2)")
+    enroll_parser.add_argument("--label", default=None, help="Custom label (e.g. Rin's Right Index)")
+
+    # enroll-rin
+    subparsers.add_parser("enroll-rin", help="Launch interactive guided enrollment wizard for Rin (rinnythepooh / Level 2)")
+
+    # verify
+    verify_parser = subparsers.add_parser("verify", help="Test fingerprint verification on a sensor")
+    verify_parser.add_argument("--device", choices=["usb", "laptop", "both"], default="both",
+                               help="Target device (default: both)")
+
+    args = parser.parse_args()
+    bus = get_bus()
+    username = getpass.getuser()
+
+    if args.command == "list" or not args.command:
+        list_devices(bus, username)
+    elif args.command == "sync":
+        sync_all_fingers(bus, username)
+    elif args.command == "enroll-rin":
+        enroll_rin_guided(bus, username)
+    elif args.command == "enroll":
+        enroll_finger(bus, username, args.device, args.finger, prompt_hint=args.label)
+        if args.alias != username or args.label:
+            cfg = load_biometric_config()
+            if "finger_map" not in cfg:
+                cfg["finger_map"] = {}
+            if username not in cfg["finger_map"]:
+                cfg["finger_map"][username] = {}
+            cfg["finger_map"][username][args.finger] = {
+                "alias": args.alias,
+                "level": args.level,
+                "label": args.label or args.finger,
+                "owner": f"Rin ({args.alias})" if args.alias == "rinnythepooh" else args.alias
+            }
+            save_biometric_config(cfg)
+    elif args.command == "verify":
+        verify_finger(bus, username, args.device)
+
+
+if __name__ == "__main__":
+    main()

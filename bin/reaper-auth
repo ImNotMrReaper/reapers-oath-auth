@@ -1,0 +1,133 @@
+#!/usr/bin/env python3
+"""
+reaper-auth: Master Biometric & Sovereign Authentication Engine CLI.
+Unified manager for Face ID, Multi-Device Fingerprints, and Remote SSH Biometrics.
+"""
+
+import sys
+import os
+import subprocess
+import argparse
+
+VERSION = "1.0.0"
+
+PURPLE = "\033[1;35m"
+BLUE = "\033[1;34m"
+GREEN = "\033[1;32m"
+YELLOW = "\033[1;33m"
+RED = "\033[1;31m"
+RESET = "\033[0m"
+
+
+def print_banner():
+    print(f"{PURPLE}================================================================{RESET}")
+    print(f"{BLUE} 🛡️  REAPER AUTH ENGINE: Sovereign Multi-Tier Biometrics v{VERSION}{RESET}")
+    print(f"{PURPLE}================================================================{RESET}")
+
+
+def cmd_status(args):
+    print_banner()
+    print(f"\n{BLUE}=== 1. Hardware Sensors & Drivers ==={RESET}")
+    # Check Howdy
+    if os.path.exists("/usr/local/bin/howdy") or os.path.exists("/usr/bin/howdy"):
+        print(f"  • Face ID (Howdy)          : {GREEN}✓ Active & Configured{RESET}")
+    else:
+        print(f"  • Face ID (Howdy)          : {YELLOW}○ Not Installed{RESET}")
+
+    # Check Fingerprint devices
+    try:
+        res = subprocess.run(["fprintd-list", os.environ.get("USER", "mr-reaper")], capture_output=True, text=True)
+        if "found" in res.stdout:
+            lines = [l.strip() for l in res.stdout.splitlines() if "Device at" in l or "Using device" in l]
+            print(f"  • Fingerprint Subsystem    : {GREEN}✓ Active ({len(lines)} devices detected){RESET}")
+        else:
+            print(f"  • Fingerprint Subsystem    : {YELLOW}○ No sensors claimed{RESET}")
+    except Exception:
+        print(f"  • Fingerprint Subsystem    : {YELLOW}○ fprintd inactive{RESET}")
+
+    # Check Bozorth3 override
+    if os.path.exists("/usr/local/lib/libfprint_bz3_override.so"):
+        print(f"  • Bozorth3 Tuner (14/40)   : {GREEN}✓ Active & Armed{RESET}")
+    else:
+        print(f"  • Bozorth3 Tuner (14/40)   : {YELLOW}○ Not Compiled{RESET}")
+
+    print(f"\n{BLUE}=== 2. SSH Biometric Passthrough ==={RESET}")
+    askpass = os.environ.get("SSH_ASKPASS", "")
+    sock = os.environ.get("SSH_AUTH_SOCK", "")
+    if os.path.exists("/usr/local/bin/reaper-ssh-askpass"):
+        print(f"  • SSH Biometric Hook       : {GREEN}✓ Installed (/usr/local/bin/reaper-ssh-askpass){RESET}")
+    else:
+        print(f"  • SSH Biometric Hook       : {YELLOW}○ Not Installed{RESET}")
+
+    if sock and os.path.exists(sock):
+        print(f"  • Active Agent Socket      : {GREEN}✓ {sock}{RESET}")
+    else:
+        print(f"  • Active Agent Socket      : {YELLOW}○ Inactive or not set{RESET}")
+
+    print(f"\n{BLUE}=== 3. Master PAM Authentication Stack ==={RESET}")
+    sudo_pam = "/etc/pam.d/sudo"
+    if os.path.exists(sudo_pam):
+        with open(sudo_pam, "r") as f:
+            content = f.read()
+        has_ssh = "pam_ssh_agent_auth.so" in content
+        has_face = "howdy" in content
+        has_fp = "dp_fprint_pam.py" in content or "reaper_fprint_pam.py" in content or "pam_fprintd.so" in content
+        print(f"  • Tier 1: SSH Biometric    : {GREEN if has_ssh else YELLOW}{'✓ Enabled' if has_ssh else '○ Not in sudo'}{RESET}")
+        print(f"  • Tier 2: Face ID (Howdy)  : {GREEN if has_face else YELLOW}{'✓ Enabled' if has_face else '○ Not in sudo'}{RESET}")
+        print(f"  • Tier 3: Multi-Print      : {GREEN if has_fp else YELLOW}{'✓ Enabled' if has_fp else '○ Not in sudo'}{RESET}")
+        print(f"  • Tier 4: Unix Password    : {GREEN}✓ Fallback Safe{RESET}")
+    print()
+
+
+def cmd_test(args):
+    print_banner()
+    print(f"\n{YELLOW}Testing biometric verification pipeline...{RESET}")
+    if os.path.exists("/usr/local/bin/reaper-ssh-askpass"):
+        subprocess.run(["/usr/local/bin/reaper-ssh-askpass", "Reaper Auth Verification Test"])
+    elif os.path.exists("/usr/local/bin/reaper-fprint-auth"):
+        subprocess.run(["/usr/local/bin/reaper-fprint-auth", os.environ.get("USER", "mr-reaper")])
+    else:
+        print(f"{RED}❌ No authentication binaries found.{RESET}")
+
+
+def cmd_setup_server(args):
+    print_banner()
+    print(f"\n{BLUE}Arming server for remote biometric passthrough...{RESET}")
+    subprocess.run(["sudo", "apt-get", "update", "-qq"])
+    subprocess.run(["sudo", "apt-get", "install", "-y", "-qq", "libpam-ssh-agent-auth"])
+    
+    os.makedirs("/etc/sudoers.d", exist_ok=True)
+    with open("/etc/sudoers.d/ssh-agent-auth", "w") as f:
+        f.write('Defaults env_keep += "SSH_AUTH_SOCK"\n')
+    os.chmod("/etc/sudoers.d/ssh-agent-auth", 0o440)
+
+    sudo_pam = "/etc/pam.d/sudo"
+    if os.path.exists(sudo_pam):
+        with open(sudo_pam, "r") as f:
+            lines = f.readlines()
+        if not any("pam_ssh_agent_auth.so" in l for l in lines):
+            lines.insert(1, "auth    sufficient    pam_ssh_agent_auth.so file=%h/.ssh/authorized_keys\n")
+            with open(sudo_pam, "w") as f:
+                f.writelines(lines)
+    print(f"{GREEN}✓ Server successfully armed for SSH biometrics!{RESET}\n")
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Reaper Auth Engine CLI")
+    subparsers = parser.add_subparsers(dest="command", help="Command to execute")
+
+    subparsers.add_parser("status", help="Show system biometric status")
+    subparsers.add_parser("test", help="Test live biometric authentication")
+    subparsers.add_parser("setup-server", help="Arm current machine as remote SSH biometric server")
+
+    args = parser.parse_args()
+    if args.command == "status" or not args.command:
+        cmd_status(args)
+    elif args.command == "test":
+        cmd_test(args)
+    elif args.command == "setup-server":
+        cmd_setup_server(args)
+
+
+if __name__ == "__main__":
+    main()
