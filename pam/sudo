@@ -1,0 +1,19 @@
+#%PAM-1.0
+
+# 1. Facial Recognition (Howdy via pam_python)
+auth       sufficient   pam_python.so /lib/security/howdy/pam.py
+
+# 2. Multi-Device Fingerprint Engine (Laptop Goodix + DigitalPersona USB, max 5 tries -> password)
+auth       sufficient   pam_python.so /lib/security/reaper_fprint_pam.py
+
+# 3. Unix Password Fallback
+auth       sufficient   pam_unix.so try_first_pass nullok
+auth       required     pam_deny.so
+
+# Session and account management
+session    required     pam_limits.so
+session    required     pam_env.so readenv=1 user_readenv=0
+session    required     pam_env.so readenv=1 envfile=/etc/default/locale user_readenv=0
+
+@include common-account
+@include common-session-noninteractive

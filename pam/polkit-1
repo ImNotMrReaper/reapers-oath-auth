@@ -1,0 +1,7 @@
+#%PAM-1.0
+# Howdy Facial Recognition -> Biometric/Unix Fallback for Polkit
+auth       sufficient   pam_python.so /lib/security/howdy/pam.py
+auth       include      common-auth
+account    include      common-account
+password   include      common-password
+session    include      common-session

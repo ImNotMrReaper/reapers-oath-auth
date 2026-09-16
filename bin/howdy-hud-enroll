@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# Direct shortcut to Howdy High-Performance Interactive Biometric HUD Enrollment
+if [ "$EUID" -ne 0 ]; then
+    exec sudo -E /usr/bin/python3 /lib/security/howdy/cli/hud_enroll.py "$@"
+else
+    exec /usr/bin/python3 /lib/security/howdy/cli/hud_enroll.py "$@"
+fi

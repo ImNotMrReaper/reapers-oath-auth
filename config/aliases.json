@@ -1,0 +1,154 @@
+{
+  "access_levels": {
+    "1": {
+      "id": "level-1",
+      "level": 1,
+      "name": "Level 1: Primary Owner (Root / Master Authority)",
+      "badge": "\ud83d\udc51 [LEVEL 1: PRIMARY OWNER]",
+      "description": "Full root and master authority. Unrestricted sudo, Polkit admin dialogs, Face ID, and fingerprint authorization.",
+      "face_auth": true,
+      "fingerprint_auth": true,
+      "default_permissions": {
+        "desktop_login": true,
+        "lockscreen_unlock": true,
+        "polkit_admin": true,
+        "sudo_mode": "unrestricted"
+      }
+    },
+    "2": {
+      "id": "level-2",
+      "level": 2,
+      "name": "Level 2: Second in Command (Authorized Partner / Operator)",
+      "badge": "\ud83d\udc96 [LEVEL 2: SECOND IN COMMAND]",
+      "description": "High-trust partner access. Fingerprint unlock for desktop and lockscreen. Strictly whitelisted sudo commands. Face ID and Polkit admin blocked.",
+      "face_auth": false,
+      "fingerprint_auth": true,
+      "default_permissions": {
+        "desktop_login": true,
+        "lockscreen_unlock": true,
+        "polkit_admin": false,
+        "sudo_mode": "whitelist"
+      }
+    },
+    "3": {
+      "id": "level-3",
+      "level": 3,
+      "name": "Level 3: Limited Access (Guest / Standard Unlock)",
+      "badge": "\ud83d\udc64 [LEVEL 3: LIMITED ACCESS]",
+      "description": "Basic unlock privileges only. Fingerprint unlock for desktop and lockscreen. Sudo execution completely disabled. Polkit admin blocked.",
+      "face_auth": false,
+      "fingerprint_auth": true,
+      "default_permissions": {
+        "desktop_login": true,
+        "lockscreen_unlock": true,
+        "polkit_admin": false,
+        "sudo_mode": "disabled"
+      }
+    }
+  },
+  "aliases": {
+    "mr-reaper": {
+      "alias": "mr-reaper",
+      "level": 1,
+      "unix_account": "mr-reaper",
+      "badge": "\ud83d\udc51",
+      "face_auth": true,
+      "fingerprint_auth": true
+    },
+    "rinnythepooh": {
+      "alias": "rinnythepooh",
+      "level": 2,
+      "unix_account": "mr-reaper",
+      "badge": "\ud83d\udc96",
+      "face_auth": false,
+      "fingerprint_auth": true
+    }
+  },
+  "finger_map": {
+    "mr-reaper": {
+      "right-index-finger": {
+        "alias": "mr-reaper",
+        "level": 1,
+        "label": "Mr-Reaper Right Index Finger",
+        "owner": "mr-reaper"
+      },
+      "right-thumb": {
+        "alias": "mr-reaper",
+        "level": 1,
+        "label": "Mr-Reaper Right Thumb",
+        "owner": "mr-reaper"
+      },
+      "left-index-finger": {
+        "alias": "mr-reaper",
+        "level": 1,
+        "label": "Mr-Reaper Left Index Finger",
+        "owner": "mr-reaper"
+      },
+      "left-thumb": {
+        "alias": "mr-reaper",
+        "level": 1,
+        "label": "Mr-Reaper Left Thumb",
+        "owner": "mr-reaper"
+      },
+      "right-middle-finger": {
+        "alias": "rinnythepooh",
+        "level": 2,
+        "label": "rinnythepooh Right Index Finger",
+        "owner": "rinnythepooh"
+      },
+      "right-ring-finger": {
+        "alias": "rinnythepooh",
+        "level": 2,
+        "label": "rinnythepooh Right Thumb",
+        "owner": "rinnythepooh"
+      },
+      "left-middle-finger": {
+        "alias": "rinnythepooh",
+        "level": 2,
+        "label": "rinnythepooh Left Index Finger",
+        "owner": "rinnythepooh"
+      },
+      "left-ring-finger": {
+        "alias": "rinnythepooh",
+        "level": 2,
+        "label": "rinnythepooh Left Thumb",
+        "owner": "rinnythepooh"
+      }
+    }
+  },
+  "permissions": {
+    "rinnythepooh": {
+      "desktop_login": true,
+      "lockscreen_unlock": true,
+      "polkit_admin": false,
+      "sudo_mode": "whitelist",
+      "sudo_whitelist": [
+        "/usr/bin/apt update",
+        "/usr/bin/apt upgrade",
+        "/usr/bin/systemctl restart",
+        "/usr/bin/systemctl status",
+        "/usr/bin/reboot",
+        "/usr/bin/poweroff",
+        "/usr/bin/brightnessctl"
+      ],
+      "blocked_commands": [
+        "passwd",
+        "visudo",
+        "su",
+        "bash",
+        "sh",
+        "zsh",
+        "rm -rf",
+        "useradd",
+        "usermod",
+        "userdel"
+      ]
+    }
+  },
+  "future_user_accounts": {
+    "note": "When a dedicated UNIX account is created in Ubuntu (e.g. sudo adduser rinnythepooh), update unix_account above or migrate templates via reaper-fingerprint migrate.",
+    "registered_accounts": [
+      "mr-reaper"
+    ]
+  }
+}

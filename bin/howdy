@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+# ==============================================================================
+# HOWDY FACIAL RECOGNITION CLI LAUNCHER
+# ==============================================================================
+
+set -e
+
+# Find Howdy installation directory
+if [ -d "/lib/security/howdy" ]; then
+    HOWDY_DIR="/lib/security/howdy"
+elif [ -d "/usr/lib/security/howdy" ]; then
+    HOWDY_DIR="/usr/lib/security/howdy"
+else
+    # Fallback to script location
+    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+    if [ -d "${SCRIPT_DIR}/howdy" ]; then
+        HOWDY_DIR="${SCRIPT_DIR}/howdy"
+    else
+        echo "Error: Could not locate Howdy installation directory."
+        exit 1
+    fi
+fi
+
+exec python3 "${HOWDY_DIR}/cli.py" "$@"

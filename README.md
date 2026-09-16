@@ -1,14 +1,14 @@
-# Reaper Auth Engine 🛡️
+# Reaper's Oath Auth Engine 🛡️
 
-**Sovereign Multi-Tier Biometric & Remote SSH Authentication Engine for Linux**
+**Universal Sovereign Multi-Tier Biometric & Remote SSH Authentication Suite for Linux**
 
-A unified, production-grade security architecture that orchestrates **Howdy Face ID**, **Multi-Device Optical & Capacitive Fingerprints (Digital Persona U.are.U 4500 + Laptop Goodix)**, and **Remote SSH Biometric Passthrough** into a seamless, zero-password Linux experience.
+Reaper's Oath is an all-in-one Linux biometric architecture combining **Howdy Face ID**, **Multi-Device Optical & Capacitive Fingerprints (Digital Persona U.are.U 4500 + Laptop Goodix MOC)**, **Multi-User Access Level Hierarchies**, and **Remote SSH Biometric Passthrough** into a unified, zero-password authentication engine.
 
 ---
 
-## ⚡ Architecture Overview
+## ⚡ The Sovereign Authentication Pipeline
 
-The Reaper Auth Engine organizes authentication into a prioritized, non-blocking biometric pipeline:
+Every authorization request (Terminal `sudo`, Polkit GUI Dialogs, GDM Login, Lockscreen, or Remote SSH) traverses an intelligent, prioritized pipeline:
 
 ```text
                                  [Authentication Trigger]
@@ -22,10 +22,10 @@ The Reaper Auth Engine organizes authentication into a prioritized, non-blocking
                                              │ (If not on SSH)
                                              ▼
                    ┌──────────────────────────────────────────────────┐
-                   │  Tier 2: High-Speed Face ID (Howdy)              │
-                   │  128-D Euclidean Vector match / 1s shutter check │
+                   │  Tier 2: High-Speed Face ID (Howdy Engine)       │
+                   │  128-D ResNet Vector match / 1s shutter check    │
                    └─────────────────────────┬────────────────────────┘
-                                             │ (If camera closed or no match)
+                                             │ (If camera closed or dark)
                                              ▼
                    ┌──────────────────────────────────────────────────┐
                    │  Tier 3: Multi-Device Concurrent Fingerprints     │
@@ -42,28 +42,40 @@ The Reaper Auth Engine organizes authentication into a prioritized, non-blocking
 
 ---
 
-## 🚀 1-Line Quick Start
+## 👥 Multi-User Access Level Hierarchies
 
-### 🖥️ 1. Workstation / Laptop Setup
-Arms your workstation with Face ID, Multi-Device Fingerprints, and the SSH Biometric Hook:
+Reaper's Oath allows you to enroll multiple people with granular, hardware-enforced permission tiers:
+
+| Tier | Role | Identity | Privileges & Hardware Constraints |
+|:---:|:---|:---|:---|
+| 👑 **Level 1** | **Primary Owner** | `mr-reaper` | Unrestricted root authority. Full `sudo`, Polkit administrative dialogs, Face ID, and all fingerprint sensors. |
+| 💖 **Level 2** | **Second in Command** | `rinnythepooh` (Rin) | High-trust partner access. Desktop login and lockscreen unlock. Sudo strictly restricted to whitelisted operational commands (`apt update`, `systemctl status`, `reboot`). Blocked from raw root shells (`bash`, `su`, `visudo`, `passwd`). |
+| 👤 **Level 3** | **Limited Access** | Guest / Operator | Standard unlock privileges only. Lockscreen and desktop login via fingerprint. Sudo access completely disabled. |
+
+---
+
+## 🚀 1-Line Quick Installation
+
+### 🖥️ 1. Workstation / Laptop (All-In-One Setup)
+Arms your laptop with Face ID, Multi-Device Fingerprint drivers, Access Hierarchies, and the SSH Biometric Hook:
 ```bash
-curl -fsSL https://raw.githubusercontent.com/ImNotMrReaper/reaper-auth-engine/main/install.sh | sudo bash
+curl -fsSL https://raw.githubusercontent.com/ImNotMrReaper/reapers-oath-auth/main/install.sh | sudo bash
 ```
 
 ### 🥧 2. Remote Server / Raspberry Pi Setup
-Arms any remote headless server, Raspberry Pi, or cloud VM to challenge your laptop's biometrics for `sudo`:
+Arms any remote headless server, Raspberry Pi (e.g. Scythe), or cloud VM to challenge your laptop's biometrics for `sudo`:
 ```bash
-curl -fsSL https://raw.githubusercontent.com/ImNotMrReaper/reaper-auth-engine/main/install.sh | sudo bash -s -- --server
+curl -fsSL https://raw.githubusercontent.com/ImNotMrReaper/reapers-oath-auth/main/install.sh | sudo bash -s -- --server
 ```
 
 ---
 
-## 🔐 How Remote SSH Biometrics Works
+## 🔐 Remote SSH Biometric Authentication
 
-When you SSH into any server running the Reaper Auth Engine with agent forwarding enabled (`ForwardAgent yes`):
+When you SSH into any remote server armed with Reaper's Oath:
 1. You run `sudo command` on the remote server.
-2. The server's PAM stack sends a cryptographic signing challenge back across the SSH tunnel to your laptop.
-3. Your laptop's `reaper-ssh-askpass` hook intercepts the challenge and immediately triggers **Face ID** or your **Fingerprint reader**.
+2. The server challenges your forwarded SSH agent socket (`ForwardAgent yes`).
+3. Your workstation's `reaper-ssh-askpass` hook intercepts the challenge and immediately triggers **Face ID** or your **Fingerprint sensor**.
 4. Once verified, the challenge is signed and remote `sudo` is granted in milliseconds. No passwords ever travel across the wire, and no private keys leave your workstation.
 
 ---
@@ -74,22 +86,20 @@ When you SSH into any server running the Reaper Auth Engine with agent forwardin
 # View comprehensive subsystem status (Sensors, Drivers, SSH Hook, PAM Stack)
 reaper-auth status
 
-# Run a live interactive verification test
+# View registered identities, access levels, and enrolled fingers
+reaper-auth users
+
+# Interactive wizard to add a new person and assign access levels
+reaper-auth add-user
+
+# Run live biometric verification test
 reaper-auth test
 
-# Arm current machine as an SSH biometric target server
-reaper-auth setup-server
+# Launch real-time augmented reality Face ID HUD
+howdy test
 ```
 
 ---
 
-## 🧩 Modular Subsystems
-
-* **Face ID Engine:** Uses dlib ResNet-128D embeddings, YuNet ONNX detection, and automatic camera shutter obstruction fallback.
-* **Optical Fingerprint Engine:** Employs `libfprint_bz3_override.so` to dynamically lower the NIST Bozorth3 threshold from `40` to `14`, fixing the notorious match failure on optical touch prisms.
-* **Multi-Device Concurrency:** Claims both internal laptop capacitive sensors (Goodix MOC) and external optical USB readers (Digital Persona U.are.U 4500) concurrently via D-Bus.
-
----
-
 ## 📄 License
-MIT License. (c) Mr. Reaper.
+MIT License. Open-source and free for personal and sovereign homelab use. (c) Mr. Reaper.

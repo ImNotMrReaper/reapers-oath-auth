@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+# Direct shortcut to 5-angle Face ID calibration
+exec howdy scan "$@"
